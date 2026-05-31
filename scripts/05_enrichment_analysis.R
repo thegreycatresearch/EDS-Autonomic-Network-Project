@@ -1,7 +1,7 @@
 # ============================================================
 # 05_enrichment_integration.R
-# Final integrative biological interpretation
-# EDS + POTS systems biology model
+# Multi-layer functional interpretation + systems biology model
+# EDS + dysautonomia network framework
 # ============================================================
 
 # ============================
@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
   library(org.Hs.eg.db)
   library(dplyr)
+  library(tidyr)
   library(ggplot2)
 
 })
@@ -22,137 +23,205 @@ suppressPackageStartupMessages({
 # ============================
 
 RESULTS_DIR <- "results"
-NETWORK_DIR <- file.path(RESULTS_DIR, "networks")
-ENRICH_DIR <- file.path(RESULTS_DIR, "enrichment")
+DE_DIR <- file.path(RESULTS_DIR, "DEG")
+NET_DIR <- file.path(RESULTS_DIR, "networks")
+ENR_DIR <- file.path(RESULTS_DIR, "enrichment")
 
-dir.create(ENRICH_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(ENR_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ============================
 # 2. LOAD CORE DATA
 # ============================
 
-eds_degs <- read.csv(file.path(RESULTS_DIR, "EDS_DEGs.csv"), row.names = 1)
-pots_degs <- read.csv(file.path(RESULTS_DIR, "POTS_DEGs.csv"), row.names = 1)
+eds_core <- read.csv(file.path(DE_DIR, "EDS_core_genes.csv"))[,1]
+pots_core <- read.csv(file.path(DE_DIR, "POTS_core_genes.csv"))[,1]
+shared_core <- read.csv(file.path(DE_DIR, "shared_core_genes.csv"))[,1]
 
-shared_genes <- read.csv(file.path(NETWORK_DIR, "shared_core_genes.csv"))[,1]
+modules <- read.csv(file.path(NET_DIR, "consensus_modules.csv"))
 
-module_assign <- read.csv(file.path(NETWORK_DIR, "module_assignment.csv"))
-
-# ============================
-# 3. GENE FILTERING
-# ============================
-
-eds_sig <- rownames(subset(eds_degs, adj.P.Val < 0.05))
-pots_sig <- rownames(subset(pots_degs, adj.P.Val < 0.05))
-
-all_significant <- unique(c(eds_sig, pots_sig, shared_genes))
+all_genes <- unique(c(eds_core, pots_core, shared_core))
 
 # ============================
-# 4. GENE CONVERSION (ENTREZ ID)
+# 3. GENE CONVERSION
 # ============================
 
-gene_conversion <- bitr(all_significant,
-                        fromType = "SYMBOL",
-                        toType = "ENTREZID",
-                        OrgDb = org.Hs.eg.db)
+gene_map <- bitr(all_genes,
+                 fromType = "SYMBOL",
+                 toType = "ENTREZID",
+                 OrgDb = org.Hs.eg.db)
 
-entrez_genes <- gene_conversion$ENTREZID
+entrez <- gene_map$ENTREZID
 
 # ============================
-# 5. GO ENRICHMENT
+# 4. GLOBAL ENRICHMENT (BASE)
 # ============================
 
-go_enrich <- enrichGO(
-  gene = entrez_genes,
+ego <- enrichGO(
+  gene = entrez,
   OrgDb = org.Hs.eg.db,
   ont = "BP",
-  pAdjustMethod = "BH",
-  readable = TRUE
-)
-
-write.csv(as.data.frame(go_enrich),
-          file = file.path(ENRICH_DIR, "GO_enrichment.csv"))
-
-# ============================
-# 6. KEGG PATHWAY ANALYSIS
-# ============================
-
-kegg_enrich <- enrichKEGG(
-  gene = entrez_genes,
-  organism = "hsa",
+  readable = TRUE,
   pAdjustMethod = "BH"
 )
 
-write.csv(as.data.frame(kegg_enrich),
-          file = file.path(ENRICH_DIR, "KEGG_enrichment.csv"))
-
-# ============================
-# 7. NEUROVASCULAR FILTERING (KEY STEP)
-# ============================
-
-neurovascular_terms <- c(
-  "vascular",
-  "nervous system",
-  "autonomic",
-  "adrenergic",
-  "smooth muscle",
-  "calcium signaling",
-  "extracellular matrix"
+ekegg <- enrichKEGG(
+  gene = entrez,
+  organism = "hsa"
 )
 
-go_df <- as.data.frame(go_enrich)
-
-neuro_go <- go_df %>%
-  filter(grepl(paste(neurovascular_terms, collapse="|"),
-                Description,
-                ignore.case = TRUE))
-
-write.csv(neuro_go,
-          file = file.path(ENRICH_DIR, "neurovascular_GO.csv"))
-
 # ============================
-# 8. MODULE BIOLOGICAL ANNOTATION
+# 5. REDUNDANCY REDUCTION (IMPORTANT UPGRADE)
 # ============================
 
-module_summary <- module_assign %>%
-  group_by(module) %>%
-  summarise(
-    genes = n(),
-    genes_list = paste(gene, collapse = ";")
+simplified_go <- simplify(ego, cutoff = 0.7, by = "p.adjust")
+
+# ============================
+# 6. MODULE-LEVEL ENRICHMENT (KEY STEP)
+# ============================
+
+module_enrichment <- list()
+
+for (mod in unique(modules$EDS)) {
+
+  mod_genes <- modules$gene[modules$EDS == mod]
+
+  mod_map <- bitr(mod_genes,
+                  fromType = "SYMBOL",
+                  toType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db)
+
+  if (nrow(mod_map) < 10) next
+
+  ego_mod <- enrichGO(
+    gene = mod_map$ENTREZID,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    readable = TRUE
   )
 
-write.csv(module_summary,
-          file = file.path(ENRICH_DIR, "module_summary.csv"))
+  module_enrichment[[mod]] <- ego_mod
+
+}
 
 # ============================
-# 9. CORE MODEL CONSTRUCTION
+# 7. NEUROVASCULAR AXIS EXTRACTION
 # ============================
 
-model <- list(
+keywords <- c(
+  "vascular",
+  "autonomic",
+  "adrenergic",
+  "extracellular matrix",
+  "collagen",
+  "smooth muscle",
+  "calcium",
+  "ion transport",
+  "endothelial"
+)
 
-  ECM = c("COL1A1", "COL3A1", "COL5A1", "ELN", "TNXB"),
+go_df <- as.data.frame(ego)
 
-  autonomic = c("SLC6A2", "DBH", "TH", "ADRB1", "ADRB2"),
+neuro_axis <- go_df %>%
+  filter(grepl(paste(keywords, collapse="|"),
+               Description,
+               ignore.case = TRUE))
 
-  ion_channels = c("SCN9A", "CACNA1C", "TRPV1")
+# ============================
+# 8. PATHWAY SCORING (NEW IMPORTANT STEP)
+# ============================
+
+score_pathways <- function(df) {
+
+  df$score <- -log10(df$p.adjust) * df$Count
+
+  df <- df %>%
+    arrange(desc(score))
+
+  df
+
+}
+
+scored_go <- score_pathways(go_df)
+
+scored_kegg <- score_pathways(as.data.frame(ekegg))
+
+# ============================
+# 9. BIOLOGICAL AXES CONSTRUCTION
+# ============================
+
+biological_axes <- list(
+
+  ECM_axis = c("collagen", "extracellular matrix", "fibrosis"),
+
+  autonomic_axis = c("adrenergic", "nervous system", "synapse"),
+
+  vascular_axis = c("endothelial", "vascular", "smooth muscle"),
+
+  ion_axis = c("ion transport", "calcium", "channel")
 
 )
 
-write.csv(data.frame(model),
-          file = file.path(ENRICH_DIR, "biological_model_core.csv"))
-
 # ============================
-# 10. FINAL INTEGRATED SUMMARY
+# 10. AXIS MAPPING FUNCTION
 # ============================
 
-summary <- data.frame(
-  total_genes = length(all_significant),
-  go_terms = nrow(go_df),
-  neurovascular_terms = nrow(neuro_go),
-  kegg_pathways = nrow(as.data.frame(kegg_enrich))
+map_to_axis <- function(df, axis_terms) {
+
+  df$axis <- "other"
+
+  for (axis in names(axis_terms)) {
+
+    terms <- axis_terms[[axis]]
+
+    idx <- grepl(paste(terms, collapse="|"),
+                 df$Description,
+                 ignore.case = TRUE)
+
+    df$axis[idx] <- axis
+  }
+
+  df
+
+}
+
+go_axis <- map_to_axis(go_df, biological_axes)
+
+# ============================
+# 11. FINAL MODEL CONSTRUCTION
+# ============================
+
+final_model <- data.frame(
+
+  gene_count = c(
+    length(eds_core),
+    length(pots_core),
+    length(shared_core)
+  ),
+
+  category = c("EDS", "POTS", "Shared")
+
 )
 
-write.csv(summary,
-          file = file.path(ENRICH_DIR, "final_summary.csv"))
+# ============================
+# 12. EXPORT RESULTS
+# ============================
 
-message("Integration + enrichment completed")
+write.csv(go_df,
+          file.path(ENR_DIR, "GO_full.csv"))
+
+write.csv(neuro_axis,
+          file.path(ENR_DIR, "neurovascular_axis.csv"))
+
+write.csv(scored_go,
+          file.path(ENR_DIR, "GO_scored.csv"))
+
+write.csv(scored_kegg,
+          file.path(ENR_DIR, "KEGG_scored.csv"))
+
+write.csv(go_axis,
+          file.path(ENR_DIR, "GO_axis_mapped.csv"))
+
+write.csv(final_model,
+          file.path(ENR_DIR, "biological_summary.csv"))
+
+message("05_enrichment_integration completed")
