@@ -15,6 +15,16 @@ suppressPackageStartupMessages({
   library(pheatmap)
   library(igraph)
   library(tidyr)
+  library(patchwork)
+  
+  theme_paper <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold")
+    )
+}
 
 })
 
