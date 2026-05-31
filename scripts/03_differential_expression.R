@@ -1,7 +1,7 @@
 # ============================================================
 # 03_differential_expression.R
-# EDS vs POTS vs Controls
-# Integrative transcriptomic analysis
+# Multi-cohort differential expression + meta-signature
+# EDS + POTS systems biology framework
 # ============================================================
 
 # ============================
@@ -10,9 +10,9 @@
 
 suppressPackageStartupMessages({
 
-  library(Biobase)
   library(limma)
   library(dplyr)
+  library(matrixStats)
 
 })
 
@@ -22,203 +22,199 @@ suppressPackageStartupMessages({
 
 PROCESSED_DIR <- "data/processed"
 RESULTS_DIR <- "results"
-dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+DE_DIR <- file.path(RESULTS_DIR, "DEG")
+
+dir.create(DE_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ============================
 # 2. LOAD PROCESSED DATASETS
 # ============================
 
-load_processed <- function(gse_id) {
+files <- list.files(PROCESSED_DIR,
+                    pattern = "_processed.rds",
+                    full.names = TRUE)
 
-  file_path <- file.path(PROCESSED_DIR, paste0(gse_id, "_processed.rds"))
-
-  if (!file.exists(file_path)) {
-    stop(paste("Missing processed dataset:", gse_id))
-  }
-
-  readRDS(file_path)
-}
+datasets <- lapply(files, readRDS)
+names(datasets) <- gsub("_processed.rds", "", basename(files))
 
 # ============================
-# 3. DEFINE GROUPS (IMPORTANT)
+# 3. GROUP DEFINITIONS
 # ============================
 
-# EDIT THESE BASED ON YOUR META-DATA
-EDS_DATASETS <- c("GSE58072")
-POTS_DATASETS <- c("GSE190123", "GSE145410")
+EDS_IDS <- names(datasets)[grepl("EDS|GSE58072|GSE23186|GSE112260", names(datasets))]
+POTS_IDS <- names(datasets)[grepl("POTS|GSE190123|GSE145410|GSE52038", names(datasets))]
 
 # ============================
-# 4. BUILD DESIGN MATRIX
+# 4. LIMMA CORE FUNCTION
 # ============================
 
-build_limma_analysis <- function(expr_matrix, group_labels) {
+run_limma <- function(expr, group_labels) {
 
   group_labels <- factor(group_labels)
 
   design <- model.matrix(~0 + group_labels)
   colnames(design) <- levels(group_labels)
 
-  fit <- lmFit(expr_matrix, design)
+  fit <- lmFit(expr, design)
 
-  return(list(fit = fit, design = design))
-}
+  if (length(levels(group_labels)) == 2) {
 
-# ============================
-# 5. DIFFERENTIAL EXPRESSION FUNCTION
-# ============================
+    contrast <- makeContrasts(
+      contrasts = paste0(levels(group_labels)[1], "-", levels(group_labels)[2]),
+      levels = design
+    )
 
-run_de_analysis <- function(expr_matrix, group_labels, contrast_name) {
+    fit <- contrasts.fit(fit, contrast)
+    fit <- eBayes(fit)
 
-  model <- build_limma_analysis(expr_matrix, group_labels)
-
-  fit <- model$fit
-
-  design <- model$design
-
-  # create contrast
-  contrast_matrix <- makeContrasts(
-    contrasts = contrast_name,
-    levels = design
-  )
-
-  fit2 <- contrasts.fit(fit, contrast_matrix)
-  fit2 <- eBayes(fit2)
-
-  results <- topTable(fit2, number = Inf, adjust.method = "BH")
-
-  return(results)
-}
-
-# ============================
-# 6. LOAD ALL DATASETS
-# ============================
-
-load_all_expr <- function(dataset_ids) {
-
-  expr_list <- list()
-
-  for (id in dataset_ids) {
-
-    data <- load_processed(id)
-
-    expr_list[[id]] <- data$expression
   }
 
-  return(expr_list)
+  topTable(fit, number = Inf, adjust.method = "BH")
+
 }
 
 # ============================
-# 7. MERGE DATA (simplified approach)
+# 5. PROCESS SINGLE DATASET (IMPORTANT UPGRADE)
 # ============================
 
-merge_datasets <- function(expr_list) {
+process_single_dataset <- function(data, dataset_name) {
 
-  # intersect genes across datasets
-  common_genes <- Reduce(intersect, lapply(expr_list, rownames))
+  expr <- data$expression
 
-  expr_list <- lapply(expr_list, function(x) x[common_genes, ])
+  # extract labels (IMPORTANT FIX: no fake balancing)
+  labels <- data$sample_labels
 
-  merged <- do.call(cbind, expr_list)
+  # ensure valid comparison exists
+  if (length(unique(labels)) < 2) {
+    warning(paste("Skipping", dataset_name, "- insufficient groups"))
+    return(NULL)
+  }
 
-  return(list(
-    expr = merged,
-    genes = common_genes
-  ))
+  # run limma
+  res <- run_limma(expr, labels)
+
+  res$dataset <- dataset_name
+
+  return(res)
+
 }
 
 # ============================
-# 8. BUILD GROUP LABELS
+# 6. RUN PER DATASET (NO WRONG MERGING)
 # ============================
 
-build_labels <- function(n_eds, n_control) {
+results <- list()
 
-  c(
-    rep("EDS", n_eds),
-    rep("Control", n_control)
-  )
+for (name in names(datasets)) {
+
+  cat("Processing:", name, "\n")
+
+  res <- process_single_dataset(datasets[[name]], name)
+
+  if (!is.null(res)) {
+    results[[name]] <- res
+  }
+
 }
 
-build_labels_pots <- function(n_pots, n_control) {
+# ============================
+# 7. SPLIT RESULTS BY CONDITION
+# ============================
 
-  c(
-    rep("POTS", n_pots),
-    rep("Control", n_control)
-  )
+eds_results <- results[EDS_IDS]
+pots_results <- results[POTS_IDS]
+
+# ============================
+# 8. META-SIGNATURE EXTRACTION (KEY STEP)
+# ============================
+
+get_significant <- function(res_list) {
+
+  sig_list <- lapply(res_list, function(x) {
+
+    if (is.null(x)) return(NULL)
+
+    rownames(x[x$adj.P.Val < 0.05, ])
+
+  })
+
+  Reduce(intersect, sig_list)
+
 }
 
-# ============================
-# 9. RUN EDS ANALYSIS
-# ============================
+eds_core <- get_significant(eds_results)
+pots_core <- get_significant(pots_results)
 
-eds_list <- load_all_expr(EDS_DATASETS)
-eds_merged <- merge_datasets(eds_list)
-
-eds_labels <- build_labels(
-  ncol(eds_merged$expr) / 2,
-  ncol(eds_merged$expr) / 2
-)
-
-eds_degs <- run_de_analysis(
-  eds_merged$expr,
-  eds_labels,
-  "EDS - Control"
-)
-
-write.csv(eds_degs,
-          file = file.path(RESULTS_DIR, "EDS_DEGs.csv"))
+shared_core <- intersect(eds_core, pots_core)
 
 # ============================
-# 10. RUN POTS ANALYSIS
+# 9. EFFECT SIZE CONSISTENCY FILTER (IMPORTANT UPGRADE)
 # ============================
 
-pots_list <- load_all_expr(POTS_DATASETS)
-pots_merged <- merge_datasets(pots_list)
+filter_consistent_direction <- function(res_list, genes) {
 
-pots_labels <- build_labels_pots(
-  ncol(pots_merged$expr) / 2,
-  ncol(pots_merged$expr) / 2
-)
+  keep <- c()
 
-pots_degs <- run_de_analysis(
-  pots_merged$expr,
-  pots_labels,
-  "POTS - Control"
-)
+  for (g in genes) {
 
-write.csv(pots_degs,
-          file = file.path(RESULTS_DIR, "POTS_DEGs.csv"))
+    effects <- c()
+
+    for (res in res_list) {
+
+      if (!g %in% rownames(res)) next
+
+      effects <- c(effects, res[g, "logFC"])
+
+    }
+
+    if (length(effects) > 1) {
+
+      if (all(sign(effects) == sign(effects[1]))) {
+        keep <- c(keep, g)
+      }
+
+    }
+
+  }
+
+  keep
+
+}
+
+eds_consistent <- filter_consistent_direction(eds_results, eds_core)
+pots_consistent <- filter_consistent_direction(pots_results, pots_core)
+shared_consistent <- intersect(eds_consistent, pots_consistent)
 
 # ============================
-# 11. INTERSECTION ANALYSIS
+# 10. FINAL TABLES
 # ============================
 
-eds_sig <- eds_degs %>%
-  filter(adj.P.Val < 0.05) %>%
-  rownames()
+write.csv(data.frame(EDS_core = eds_consistent),
+          file.path(DE_DIR, "EDS_core_genes.csv"))
 
-pots_sig <- pots_degs %>%
-  filter(adj.P.Val < 0.05) %>%
-  rownames()
+write.csv(data.frame(POTS_core = pots_consistent),
+          file.path(DE_DIR, "POTS_core_genes.csv"))
 
-shared_genes <- intersect(eds_sig, pots_sig)
-
-write.csv(data.frame(shared_genes),
-          file = file.path(RESULTS_DIR, "shared_DEGs.csv"))
+write.csv(data.frame(shared_core = shared_consistent),
+          file.path(DE_DIR, "shared_core_genes.csv"))
 
 # ============================
-# 12. BASIC SUMMARY
+# 11. SUMMARY STATISTICS
 # ============================
 
 summary <- data.frame(
-  dataset = c("EDS", "POTS", "Shared"),
+
+  category = c("EDS", "POTS", "Shared"),
   genes = c(
-    length(eds_sig),
-    length(pots_sig),
-    length(shared_genes)
+    length(eds_consistent),
+    length(pots_consistent),
+    length(shared_consistent)
   )
+
 )
 
 write.csv(summary,
-          file = file.path(RESULTS_DIR, "DEG_summary.csv"))
+          file.path(DE_DIR, "DEG_summary.csv"),
+          row.names = FALSE)
 
-message("Differential expression analysis completed")
+message("03_differential_expression completed")
