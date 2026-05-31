@@ -1,13 +1,5 @@
 library(ggplot2)
 
-bio_colors <- list(
-  ECM = "#2C7BB6",
-  AUTONOMIC = "#D7191C",
-  VASCULAR = "#FDAE61",
-  ION = "#ABD9E9",
-  SHARED = "#2E2E2E"
-)
-
 fig1_pipeline <- function(output_dir) {
 
   p <- ggplot() +
