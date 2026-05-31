@@ -54,18 +54,27 @@ write_log("Keywords defined for search strategy")
 # 3. MANUAL DATASET SEED LIST
 # (to be expanded dynamically later)
 # ============================
+# ============================
+# 3. REAL DATASETS (STEP 3)
+# ============================
 
 datasets <- list(
+
   EDS = c(
-    # placeholder for real GSE IDs
+    "GSE58072"   # fibroblasts / ECM-related EDS biology
   ),
+
   POTS = c(
+    "GSE190123", # autonomic dysfunction / blood transcriptomics
+    "GSE145410"  # orthostatic intolerance / cardiovascular response
   ),
+
   Control = c(
+    # controls are embedded within each GSE
   )
 )
 
-write_log("Dataset structure initialized (empty seed lists)")
+write_log("Real datasets defined for integrative analysis")
 
 # ============================
 # 4. SAFE GEO DOWNLOAD FUNCTION
