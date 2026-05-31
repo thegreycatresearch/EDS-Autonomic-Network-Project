@@ -62,3 +62,43 @@ Packages:
 - igraph
 - patchwork
 - pheatmap
+```
+---
+
+# How to run
+
+## Step 1: Download data
+source("scripts/01_download_data.R")
+
+## Step 2: QC
+source("scripts/02_quality_control.R")
+
+## Step 3: Analysis pipeline
+source("scripts/03_differential_expression.R")
+
+## Step 4: Figures
+source("scripts/06_generate_figures.R")
+
+---
+
+## Output
+
+All outputs are saved in:
+
+```r
+results/
+```
+---
+
+## Citation
+
+If you use this pipeline, please cite:
+
+|"Systems biology analysis of dysautonomia in connective tissue disorders"
+
+---
+
+## Author
+
+Systems Biology Project — EDS / Dysautonomia Transcriptomics
+Bianca Stazzone
