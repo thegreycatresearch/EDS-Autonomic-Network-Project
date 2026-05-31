@@ -1,91 +1,64 @@
-# Autonomic Dysfunction in Ehlers-Danlos Syndrome: A Systems Biology Approach
+# EDS + Dysautonomia Systems Biology
 
 ## Overview
 
-This project investigates the molecular basis of autonomic dysfunction in Ehlers-Danlos syndrome using integrative transcriptomics, network biology, and pathway enrichment analysis.
+This repository contains a systems biology pipeline analyzing transcriptomic datasets associated with **Ehlers-Danlos Syndrome (EDS)** and **dysautonomia (POTS-like phenotypes)**.
 
-We focus on the interaction between:
+The goal is to identify shared molecular mechanisms linking:
 
-- Extracellular matrix dysfunction
-- Autonomic nervous system signaling
-- Ion channel regulation
-- Neurovascular pathways
+- Extracellular matrix (ECM) dysfunction  
+- Vascular instability  
+- Autonomic dysregulation  
 
-in :contentReference[oaicite:0]{index=0}.
-
----
-
-## Hypothesis
-
-Autonomic dysfunction in EDS arises from a systems-level reprogramming of gene networks linking extracellular matrix abnormalities with neurovascular and autonomic signaling pathways.
+and to build an integrated mechanistic model.
 
 ---
 
-## Methodology
+## Study Design
 
-We implemented a reproducible pipeline in R including:
+The pipeline includes:
 
-1. GEO dataset retrieval  
-2. Quality control and normalization  
-3. Differential expression analysis (EDS vs POTS vs controls)  
-4. Weighted Gene Co-expression Network Analysis (WGCNA)  
-5. Protein interaction network inference  
-6. Functional enrichment analysis (GO / KEGG / Reactome)
-
----
-
-## Data Sources
-
-All datasets were obtained from:
-
-:contentReference[oaicite:1]{index=1}
+1. GEO dataset acquisition  
+2. Quality control & normalization  
+3. Differential gene expression analysis  
+4. Co-expression network analysis (WGCNA-inspired)  
+5. Functional enrichment (GO analysis)  
+6. Integrated systems-level modeling  
+7. Publication-ready figure generation  
 
 ---
 
-## Key Analyses
+## 📊 Key Figures
 
-- Differentially expressed genes (DEGs)
-- Shared molecular signatures between EDS and POTS
-- Gene co-expression modules (WGCNA)
-- Hub gene identification
-- Neurovascular pathway enrichment
-
----
-
-## Outputs
-
-- DEG tables (EDS vs POTS)
-- Co-expression modules
-- Hub genes
-- Enriched biological pathways
-- Network models of disease
+- **Figure 1:** Analysis workflow  
+- **Figure 2:** Differential gene signatures (EDS vs POTS)  
+- **Figure 3:** Co-expression network structure  
+- **Figure 4:** Functional enrichment analysis  
+- **Figure 5:** Integrated mechanistic model  
+- **Graphical Abstract:** System-level disease model  
 
 ---
 
-## Biological Model
+## Biological Hypothesis
 
-The results support a model where:
+We propose a unified model where:
 
-- ECM dysfunction → altered mechanotransduction  
-- Mechanotransduction → transcriptional reprogramming  
-- Reprogramming → autonomic dysregulation  
+> ECM dysfunction → vascular instability → autonomic dysregulation
+
+forms a continuous biological axis underlying dysautonomia in connective tissue disorders.
 
 ---
 
-## Reproducibility
-
-This project uses:
-
-- R (≥4.0)
-- renv for environment control
-- Fully modular scripts
-
-To reproduce:
+## Requirements
 
 ```r
-renv::restore()
-source("scripts/01_download_data.R")
-source("scripts/02_quality_control.R")
-source("scripts/03_differential_expression.R")
-source("scripts/04_network_analysis.R")
-source("scripts/05_enrichment_integration.R")
+R version >= 4.2
+
+Packages:
+- GEOquery
+- Biobase
+- ggplot2
+- dplyr
+- igraph
+- patchwork
+- pheatmap
