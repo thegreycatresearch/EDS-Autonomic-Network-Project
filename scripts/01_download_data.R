@@ -1,7 +1,7 @@
 # ============================================================
 # 01_download_data.R
-# Integrative transcriptomic pipeline:
-# EDS + Dysautonomia / POTS systems biology project
+# Automated GEO acquisition + QC + standardization pipeline
+# EDS + dysautonomia systems biology project
 # ============================================================
 
 # ============================
@@ -9,211 +9,285 @@
 # ============================
 
 suppressPackageStartupMessages({
+
   library(GEOquery)
   library(Biobase)
+  library(dplyr)
+  library(stringr)
+
 })
 
 # ============================
-# 1. PROJECT CONFIG
+# 1. PATHS
 # ============================
 
 BASE_DIR <- getwd()
 
 DATA_DIR <- file.path(BASE_DIR, "data")
 RAW_DIR <- file.path(DATA_DIR, "raw")
-PROCESSED_DIR <- file.path(DATA_DIR, "processed")
-LOG_DIR <- file.path(BASE_DIR, "logs")
+LOG_DIR <- file.path(DATA_DIR, "logs")
 
 dir.create(RAW_DIR, recursive = TRUE, showWarnings = FALSE)
-dir.create(PROCESSED_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(LOG_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# ============================
+# 2. LOGGING
+# ============================
 
 log_file <- file.path(LOG_DIR, "download_log.txt")
 
-write_log <- function(message) {
-  cat(paste0(Sys.time(), " - ", message, "\n"),
-      file = log_file, append = TRUE)
-  message(message)
+write_log <- function(msg) {
+  cat(paste0("[", Sys.time(), "] ", msg, "\n"),
+      file = log_file,
+      append = TRUE)
 }
 
-write_log("=== Starting GEO download pipeline ===")
-
 # ============================
-# 2. BIOLOGICAL KEYWORDS
+# 3. DATASET STRUCTURE (EXPANDED)
 # ============================
 
-keywords <- list(
-  EDS = c("Ehlers Danlos", "Ehlers-Danlos", "connective tissue"),
-  POTS = c("Postural Orthostatic Tachycardia", "POTS"),
-  Dysautonomia = c("dysautonomia", "orthostatic intolerance", "autonomic")
-)
-
-write_log("Keywords defined for search strategy")
-
-# ============================
-# 3. MANUAL DATASET SEED LIST
-# (to be expanded dynamically later)
-# ============================
-# ============================
-# 3. REAL DATASETS (STEP 3)
-# ============================
-
-datasets <- list(
+dataset_map <- list(
 
   EDS = c(
-    "GSE58072"   # fibroblasts / ECM-related EDS biology
+    "GSE58072",
+    "GSE23186",
+    "GSE112260"
   ),
 
   POTS = c(
-    "GSE190123", # autonomic dysfunction / blood transcriptomics
-    "GSE145410"  # orthostatic intolerance / cardiovascular response
-  ),
-
-  Control = c(
-    # controls are embedded within each GSE
+    "GSE190123",
+    "GSE145410",
+    "GSE52038"
   )
+
 )
 
-write_log("Real datasets defined for integrative analysis")
-
 # ============================
-# 4. SAFE GEO DOWNLOAD FUNCTION
+# 4. PLATFORM CHECK (NEW)
 # ============================
 
-download_geo <- function(gse_id) {
+check_platform <- function(gse) {
 
-  write_log(paste0("Downloading dataset: ", gse_id))
+  platform <- annotation(gse[[1]])
 
-  result <- tryCatch({
+  write_log(paste("Platform detected:", platform))
 
-    gse <- getGEO(gse_id, GSEMatrix = TRUE, getGPL = TRUE)
+  return(platform)
+}
 
-    # If multiple platforms, select first
-    if (class(gse) == "list") {
-      expr_set <- gse[[1]]
+# ============================
+# 5. SAFE GEO DOWNLOAD (IMPROVED)
+# ============================
+
+download_geo_safe <- function(gse_id) {
+
+  tryCatch({
+
+    write_log(paste("Downloading", gse_id))
+
+    gse <- getGEO(gse_id, GSEMatrix = TRUE)
+
+    # handle multiple platforms (IMPORTANT FIX)
+    if (length(gse) > 1) {
+      write_log(paste("Multiple platforms detected in", gse_id, "- using first"))
+      gse <- gse[[1]]
     } else {
-      expr_set <- gse
+      gse <- gse[[1]]
     }
 
-    # Extract expression matrix
-    expr_matrix <- exprs(expr_set)
+    expr <- exprs(gse)
+    pheno <- pData(gse)
+    feature <- fData(gse)
 
-    # Extract phenotype data
-    pheno <- pData(expr_set)
+    platform <- annotation(gse)
 
-    # Extract feature data (gene annotation)
-    feature <- fData(expr_set)
-
-    # Build output structure
-    output <- list(
-      expression = expr_matrix,
+    list(
+      expression = expr,
       phenotype = pheno,
       features = feature,
-      platform = annotation(expr_set),
-      gse = gse_id
+      gse_id = gse_id,
+      platform = platform
     )
-
-    # Save raw RDS
-    saveRDS(output,
-            file = file.path(RAW_DIR, paste0(gse_id, ".rds")))
-
-    write_log(paste0("SUCCESS: ", gse_id, " downloaded"))
-
-    return(output)
 
   }, error = function(e) {
 
-    write_log(paste0("ERROR downloading ", gse_id, ": ", e$message))
+    write_log(paste("FAILED:", gse_id, e$message))
+
     return(NULL)
 
   })
 
-  return(result)
 }
 
 # ============================
-# 5. DATASET CLASSIFICATION FUNCTION
+# 6. PROBE → GENE CLEANING (IMPORTANT UPGRADE)
 # ============================
 
-classify_dataset <- function(gse_id) {
+clean_expression_matrix <- function(expr, feature_data) {
 
-  # simple heuristic classification (can be improved later)
+  # try to map probes to gene symbols
+  if ("Gene Symbol" %in% colnames(feature_data)) {
 
-  gse_info <- getGEO(gse_id, GSEMatrix = FALSE)
+    genes <- feature_data$`Gene Symbol`
 
-  title <- Meta(gse_info)$title
-  summary <- Meta(gse_info)$summary
+    # remove empty mappings
+    keep <- genes != "" & !is.na(genes)
 
-  text <- paste(title, summary)
+    expr <- expr[keep, ]
+    rownames(expr) <- genes[keep]
 
-  category <- "Unknown"
+    # collapse duplicates (mean expression)
+    expr <- aggregate(expr,
+                      by = list(rownames(expr)),
+                      FUN = mean)
 
-  if (grepl("Ehlers|Danlos|connective", text, ignore.case = TRUE)) {
-    category <- "EDS"
+    rownames(expr) <- expr$Group.1
+    expr <- expr[, -1]
+
   }
 
-  if (grepl("POTS|orthostatic|dysautonomia|autonomic", text, ignore.case = TRUE)) {
-    category <- "POTS"
-  }
-
-  return(category)
+  return(expr)
 }
 
 # ============================
-# 6. MAIN PIPELINE
+# 7. BASIC QC (NEW ADDITION)
 # ============================
 
-write_log("Starting dataset processing pipeline")
+qc_metrics <- function(expr) {
 
-all_gse <- unique(unlist(datasets))
+  list(
+    NA_fraction = mean(is.na(expr)),
+    gene_variance = mean(apply(expr, 1, var, na.rm = TRUE)),
+    sample_variance = mean(apply(expr, 2, var, na.rm = TRUE))
+  )
 
-results <- list()
+}
 
-for (gse_id in all_gse) {
+# ============================
+# 8. SAMPLE CLASSIFICATION
+# ============================
 
-  write_log(paste0("Processing: ", gse_id))
+classify_samples <- function(pheno_data) {
 
-  # classify dataset
-  class <- tryCatch({
-    classify_dataset(gse_id)
-  }, error = function(e) {
-    "Unknown"
-  })
+  labels <- rep("Unknown", nrow(pheno_data))
 
-  write_log(paste0("Classified as: ", class))
+  if ("characteristics_ch1" %in% colnames(pheno_data)) {
 
-  # download dataset
-  dataset <- download_geo(gse_id)
+    text <- tolower(paste(pheno_data$characteristics_ch1, collapse = " "))
 
-  if (!is.null(dataset)) {
+    if (grepl("eds|ehlers|connective", text)) {
+      labels[] <- "EDS"
+    }
 
-    results[[gse_id]] <- list(
-      data = dataset,
-      class = class
+    if (grepl("pots|orthostatic|dysautonomia", text)) {
+      labels[] <- "POTS"
+    }
+
+    if (grepl("control|healthy", text)) {
+      labels[] <- "Control"
+    }
+
+  }
+
+  return(labels)
+}
+
+# ============================
+# 9. SAVE DATASET
+# ============================
+
+save_dataset <- function(data, group_name) {
+
+  file_path <- file.path(RAW_DIR, paste0(data$gse_id, "_", group_name, ".rds"))
+
+  saveRDS(data, file_path)
+
+  write_log(paste("Saved", data$gse_id, "as", group_name))
+
+}
+
+# ============================
+# 10. MAIN PIPELINE (ENHANCED)
+# ============================
+
+all_datasets <- list()
+
+qc_summary <- list()
+
+for (group in names(dataset_map)) {
+
+  for (gse_id in dataset_map[[group]]) {
+
+    data <- download_geo_safe(gse_id)
+
+    if (is.null(data)) next
+
+    # QC before cleaning
+    qc_summary[[gse_id]] <- qc_metrics(data$expression)
+
+    # CLEAN EXPRESSION MATRIX (NEW STEP)
+    data$expression <- clean_expression_matrix(
+      data$expression,
+      data$features
     )
+
+    # sample classification
+    data$sample_labels <- classify_samples(data$phenotype)
+
+    data$group <- group
+
+    # store
+    all_datasets[[gse_id]] <- data
+
+    # save
+    save_dataset(data, group)
+
   }
 }
 
 # ============================
-# 7. SUMMARY REPORT
+# 11. GLOBAL SUMMARY (ENHANCED)
 # ============================
 
-summary_table <- data.frame(
-  GSE = names(results),
-  Class = sapply(results, function(x) x$class)
+summary_df <- data.frame(
+
+  dataset = names(all_datasets),
+  samples = sapply(all_datasets, function(x) ncol(x$expression)),
+  genes = sapply(all_datasets, function(x) nrow(x$expression)),
+  platform = sapply(all_datasets, function(x) x$platform)
+
 )
 
-write.csv(summary_table,
-          file = file.path(PROCESSED_DIR, "dataset_summary.csv"),
+write.csv(summary_df,
+          file.path(RAW_DIR, "dataset_summary.csv"),
           row.names = FALSE)
 
-write_log("Summary table saved")
-
 # ============================
-# 8. SESSION INFO (REPRODUCIBILITY)
+# 12. QC EXPORT (NEW)
 # ============================
 
-write_log("Session information:")
-write_log(capture.output(sessionInfo()))
+qc_df <- do.call(rbind, lapply(names(qc_summary), function(id) {
 
-write_log("=== Pipeline finished ===")
+  data.frame(
+    dataset = id,
+    NA_fraction = qc_summary[[id]]$NA_fraction,
+    gene_variance = qc_summary[[id]]$gene_variance,
+    sample_variance = qc_summary[[id]]$sample_variance
+  )
+
+}))
+
+write.csv(qc_df,
+          file.path(RAW_DIR, "qc_summary.csv"),
+          row.names = FALSE)
+
+# ============================
+# 13. SESSION INFO
+# ============================
+
+writeLines(capture.output(sessionInfo()),
+           file.path(LOG_DIR, "session_info.txt"))
+
+write_log("Enhanced download + QC pipeline completed")
+
+message("01_download_data.R finished (PRO VERSION)")
