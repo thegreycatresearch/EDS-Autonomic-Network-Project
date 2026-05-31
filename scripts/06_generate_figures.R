@@ -173,3 +173,7 @@ plot_network()
 export_model_data()
 
 message("06_generate_figures completed")
+
+source("scripts/figures/graphical_abstract.R")
+
+graphical_abstract("results/figures/final_model")
