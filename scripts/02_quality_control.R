@@ -1,7 +1,7 @@
 # ============================================================
-# 02_preprocessing.R
-# Integrative transcriptomic preprocessing pipeline
-# EDS + Dysautonomia / POTS systems biology project
+# 02_quality_control.R
+# Multi-cohort QC + normalization pipeline
+# EDS + dysautonomia transcriptomics project
 # ============================================================
 
 # ============================
@@ -10,8 +10,6 @@
 
 suppressPackageStartupMessages({
 
-  library(Biobase)
-  library(GEOquery)
   library(limma)
   library(matrixStats)
   library(ggplot2)
@@ -19,240 +17,198 @@ suppressPackageStartupMessages({
 })
 
 # ============================
-# 1. PATH CONFIGURATION
+# 1. PATHS
 # ============================
 
-BASE_DIR <- getwd()
+RAW_DIR <- "data/raw"
+PROCESSED_DIR <- "data/processed"
+QC_DIR <- file.path(PROCESSED_DIR, "QC")
 
-RAW_DIR <- file.path(BASE_DIR, "data/raw")
-PROCESSED_DIR <- file.path(BASE_DIR, "data/processed")
-QC_DIR <- file.path(PROCESSED_DIR, "QC_reports")
-
-dir.create(PROCESSED_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(QC_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ============================
-# 2. DATA LOADING FUNCTION
+# 2. LOAD DATASETS
 # ============================
 
-load_dataset <- function(gse_id) {
+load_dataset <- function(file) {
+  readRDS(file)
+}
 
-  file_path <- file.path(RAW_DIR, paste0(gse_id, ".rds"))
+files <- list.files(RAW_DIR, pattern = ".rds", full.names = TRUE)
 
-  if (!file.exists(file_path)) {
-    stop(paste("Dataset not found:", gse_id))
-  }
+datasets <- lapply(files, load_dataset)
+names(datasets) <- gsub(".rds", "", basename(files))
 
-  readRDS(file_path)
+# ============================
+# 3. GENE FILTERING (LOW SIGNAL REMOVAL)
+# ============================
+
+filter_low_expression <- function(expr, min_fraction = 0.2) {
+
+  keep <- rowMeans(expr > 1) > min_fraction
+
+  expr[keep, , drop = FALSE]
+
 }
 
 # ============================
-# 3. INITIAL QUALITY CONTROL
+# 4. SAMPLE OUTLIER DETECTION
 # ============================
 
-qc_report <- list()
+detect_sample_outliers <- function(expr) {
 
-generate_qc_metrics <- function(expr_matrix, dataset_name) {
+  sample_means <- colMeans(expr, na.rm = TRUE)
+  z <- scale(sample_means)
 
-  sample_means <- colMeans(expr_matrix, na.rm = TRUE)
-  sample_sds <- apply(expr_matrix, 2, sd, na.rm = TRUE)
-
-  qc <- data.frame(
-    sample = colnames(expr_matrix),
-    mean_expression = sample_means,
-    sd_expression = sample_sds,
-    dataset = dataset_name
-  )
-
-  return(qc)
-}
-
-# ============================
-# 4. OUTLIER DETECTION (ROBUST)
-# ============================
-
-detect_outliers <- function(expr_matrix) {
-
-  sample_means <- colMeans(expr_matrix, na.rm = TRUE)
-
-  z_scores <- scale(sample_means)
-
-  outliers <- abs(z_scores) > 3
-
-  keep_samples <- !outliers
+  outliers <- abs(z) > 3
 
   list(
-    filtered_matrix = expr_matrix[, keep_samples, drop = FALSE],
-    removed_samples = colnames(expr_matrix)[outliers]
+    filtered = expr[, !outliers, drop = FALSE],
+    removed = names(sample_means)[outliers]
   )
 }
 
 # ============================
-# 5. LOG TRANSFORMATION HANDLING
+# 5. LOG TRANSFORMATION CHECK
 # ============================
 
-log_transform_if_needed <- function(expr_matrix) {
+log_transform <- function(expr) {
 
-  max_val <- max(expr_matrix, na.rm = TRUE)
-
-  if (max_val > 100) {
-    expr_matrix <- log2(expr_matrix + 1)
+  if (max(expr, na.rm = TRUE) > 100) {
+    expr <- log2(expr + 1)
   }
 
-  return(expr_matrix)
+  return(expr)
 }
 
 # ============================
-# 6. NORMALIZATION (CROSS-SAMPLE)
+# 6. NORMALIZATION (CRITICAL STEP)
 # ============================
 
-normalize_dataset <- function(expr_matrix) {
+normalize_dataset <- function(expr) {
 
-  # quantile normalization (critical for cross-platform comparability)
-  expr_matrix <- normalizeBetweenArrays(expr_matrix, method = "quantile")
+  normalizeBetweenArrays(expr, method = "quantile")
 
-  return(expr_matrix)
 }
 
 # ============================
-# 7. GENE FILTERING (LOW SIGNAL REMOVAL)
+# 7. BATCH EFFECT CHECK (PCA)
 # ============================
 
-filter_low_expression <- function(expr_matrix, threshold = 0.2) {
+run_pca <- function(expr, group_name, qc_dir) {
 
-  gene_variance <- rowVars(expr_matrix)
+  pca <- prcomp(t(expr), scale. = TRUE)
 
-  keep_genes <- gene_variance > quantile(gene_variance, threshold)
+  df <- data.frame(
+    PC1 = pca$x[,1],
+    PC2 = pca$x[,2]
+  )
 
-  expr_matrix <- expr_matrix[keep_genes, ]
+  p <- ggplot(df, aes(PC1, PC2)) +
+    geom_point() +
+    ggtitle(paste("PCA:", group_name))
 
-  return(expr_matrix)
+  ggsave(file.path(qc_dir, paste0(group_name, "_PCA.png")), p)
+
 }
 
 # ============================
-# 8. FULL PIPELINE PER DATASET
+# 8. GENE VARIANCE FILTERING
 # ============================
 
-process_dataset <- function(gse_id) {
+filter_low_variance <- function(expr, threshold = 0.25) {
 
-  message(paste("Processing dataset:", gse_id))
+  v <- apply(expr, 1, var, na.rm = TRUE)
 
-  data <- load_dataset(gse_id)
+  keep <- v > quantile(v, threshold)
+
+  expr[keep, ]
+
+}
+
+# ============================
+# 9. FULL QC PIPELINE PER DATASET
+# ============================
+
+process_qc <- function(data, name) {
 
   expr <- data$expression
 
-  # QC metrics BEFORE filtering
-  qc_before <- generate_qc_metrics(expr, gse_id)
+  # 1. log transform
+  expr <- log_transform(expr)
 
-  # Outlier detection
-  outlier_result <- detect_outliers(expr)
-  expr <- outlier_result$filtered_matrix
-
-  # log transform if needed
-  expr <- log_transform_if_needed(expr)
-
-  # normalization
-  expr <- normalize_dataset(expr)
-
-  # gene filtering
+  # 2. remove low expression genes
   expr <- filter_low_expression(expr)
 
-  # QC metrics AFTER filtering
-  qc_after <- generate_qc_metrics(expr, gse_id)
+  # 3. remove sample outliers
+  out <- detect_sample_outliers(expr)
+  expr <- out$filtered
 
-  # save QC report
-  qc_report[[gse_id]] <<- list(
-    before = qc_before,
-    after = qc_after,
-    removed_samples = outlier_result$removed_samples
-  )
+  # 4. normalize
+  expr <- normalize_dataset(expr)
 
-  # update dataset object
+  # 5. filter low variance genes
+  expr <- filter_low_variance(expr)
+
+  # 6. PCA QC plot
+  run_pca(expr, name, QC_DIR)
+
   data$expression <- expr
-  data$qc <- qc_report[[gse_id]]
-
-  # save processed dataset
-  saveRDS(
-    data,
-    file = file.path(PROCESSED_DIR, paste0(gse_id, "_processed.rds"))
-  )
+  data$qc_removed_samples <- out$removed
 
   return(data)
 }
 
 # ============================
-# 9. LOAD ALL RAW DATASETS
+# 10. APPLY TO ALL DATASETS
 # ============================
 
-files <- list.files(RAW_DIR, pattern = "*.rds", full.names = TRUE)
+processed <- list()
 
-gse_ids <- gsub("_.*|\\.rds", "", basename(files))
+qc_log <- list()
 
-results <- list()
+for (name in names(datasets)) {
 
-# ============================
-# 10. MAIN LOOP
-# ============================
+  cat("Processing:", name, "\n")
 
-for (gse in gse_ids) {
+  data <- datasets[[name]]
 
-  try({
+  data <- process_qc(data, name)
 
-    results[[gse]] <- process_dataset(gse)
+  processed[[name]] <- data
 
-  }, silent = FALSE)
+  qc_log[[name]] <- list(
+    samples = ncol(data$expression),
+    genes = nrow(data$expression)
+  )
 
 }
 
 # ============================
-# 11. GLOBAL QC SUMMARY
+# 11. SAVE PROCESSED DATA
 # ============================
 
-all_qc <- do.call(rbind, lapply(names(qc_report), function(id) {
+for (name in names(processed)) {
 
-  qc_report[[id]]$after
+  saveRDS(
+    processed[[name]],
+    file = file.path(PROCESSED_DIR, paste0(name, "_processed.rds"))
+  )
 
-}))
-
-write.csv(all_qc,
-          file = file.path(QC_DIR, "qc_summary.csv"),
-          row.names = FALSE)
+}
 
 # ============================
-# 12. DATASET SUMMARY
+# 12. GLOBAL QC SUMMARY
 # ============================
 
-summary_df <- data.frame(
-  dataset = names(results),
-  samples = sapply(results, function(x) ncol(x$expression)),
-  genes = sapply(results, function(x) nrow(x$expression))
+qc_df <- data.frame(
+  dataset = names(qc_log),
+  samples = sapply(qc_log, function(x) x$samples),
+  genes = sapply(qc_log, function(x) x$genes)
 )
 
-write.csv(summary_df,
-          file = file.path(PROCESSED_DIR, "dataset_summary.csv"),
+write.csv(qc_df,
+          file.path(QC_DIR, "qc_summary.csv"),
           row.names = FALSE)
 
-# ============================
-# 13. OPTIONAL VISUAL QC PLOT
-# ============================
-
-pdf(file.path(QC_DIR, "qc_expression_distribution.pdf"))
-
-for (id in names(qc_report)) {
-
-  hist(qc_report[[id]]$after$mean_expression,
-       main = paste("Expression distribution:", id),
-       xlab = "Mean expression")
-
-}
-
-dev.off()
-
-# ============================
-# 14. SESSION INFO (REPRODUCIBILITY)
-# ============================
-
-writeLines(capture.output(sessionInfo()),
-           file.path(PROCESSED_DIR, "session_info.txt"))
-
-message("Preprocessing pipeline completed successfully")
+message("02_quality_control.R completed successfully")
