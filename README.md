@@ -1,6 +1,6 @@
-# 🧬 Autonomic Dysfunction in Ehlers-Danlos Syndrome: A Systems Biology Approach
+# Autonomic Dysfunction in Ehlers-Danlos Syndrome: A Systems Biology Approach
 
-## 📖 Overview
+## Overview
 
 This project investigates the molecular basis of autonomic dysfunction in Ehlers-Danlos syndrome using integrative transcriptomics, network biology, and pathway enrichment analysis.
 
@@ -15,13 +15,13 @@ in :contentReference[oaicite:0]{index=0}.
 
 ---
 
-## 🎯 Hypothesis
+## Hypothesis
 
 Autonomic dysfunction in EDS arises from a systems-level reprogramming of gene networks linking extracellular matrix abnormalities with neurovascular and autonomic signaling pathways.
 
 ---
 
-## 🧪 Methodology
+## Methodology
 
 We implemented a reproducible pipeline in R including:
 
@@ -34,7 +34,7 @@ We implemented a reproducible pipeline in R including:
 
 ---
 
-## 🧬 Data Sources
+## Data Sources
 
 All datasets were obtained from:
 
@@ -42,7 +42,7 @@ All datasets were obtained from:
 
 ---
 
-## 🔬 Key Analyses
+## Key Analyses
 
 - Differentially expressed genes (DEGs)
 - Shared molecular signatures between EDS and POTS
@@ -52,7 +52,7 @@ All datasets were obtained from:
 
 ---
 
-## 📊 Outputs
+## Outputs
 
 - DEG tables (EDS vs POTS)
 - Co-expression modules
@@ -62,7 +62,7 @@ All datasets were obtained from:
 
 ---
 
-## 🧠 Biological Model
+## Biological Model
 
 The results support a model where:
 
@@ -72,7 +72,7 @@ The results support a model where:
 
 ---
 
-## ⚙️ Reproducibility
+## Reproducibility
 
 This project uses:
 
