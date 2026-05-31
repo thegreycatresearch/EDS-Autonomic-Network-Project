@@ -28,7 +28,7 @@ The pipeline includes:
 
 ---
 
-## 📊 Key Figures
+## Key Figures
 
 - **Figure 1:** Analysis workflow  
 - **Figure 2:** Differential gene signatures (EDS vs POTS)  
