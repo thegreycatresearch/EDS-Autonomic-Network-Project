@@ -1,7 +1,7 @@
 # ============================================================
 # 04_network_analysis.R
-# Advanced WGCNA + network biology integration
-# EDS + POTS systems biology framework
+# Multi-cohort WGCNA + consensus network biology
+# EDS + dysautonomia systems biology framework
 # ============================================================
 
 # ============================
@@ -11,9 +11,8 @@
 suppressPackageStartupMessages({
 
   library(WGCNA)
-  library(igraph)
   library(dplyr)
-  library(Matrix)
+  library(igraph)
 
 })
 
@@ -24,235 +23,240 @@ allowWGCNAThreads()
 # 1. PATHS
 # ============================
 
+PROCESSED_DIR <- "data/processed"
 RESULTS_DIR <- "results"
-NETWORK_DIR <- file.path(RESULTS_DIR, "networks")
-WGCNA_DIR <- file.path(NETWORK_DIR, "wgcna")
+NET_DIR <- file.path(RESULTS_DIR, "networks")
 
-dir.create(NETWORK_DIR, recursive = TRUE, showWarnings = FALSE)
-dir.create(WGCNA_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(NET_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ============================
-# 2. LOAD DEG DATA
+# 2. LOAD DATA
 # ============================
 
-eds_degs <- read.csv(file.path(RESULTS_DIR, "EDS_DEGs.csv"), row.names = 1)
-pots_degs <- read.csv(file.path(RESULTS_DIR, "POTS_DEGs.csv"), row.names = 1)
+files <- list.files(PROCESSED_DIR,
+                    pattern = "_processed.rds",
+                    full.names = TRUE)
 
-eds_sig <- rownames(subset(eds_degs, adj.P.Val < 0.05))
-pots_sig <- rownames(subset(pots_degs, adj.P.Val < 0.05))
-
-all_genes <- unique(c(eds_sig, pots_sig))
+datasets <- lapply(files, readRDS)
+names(datasets) <- gsub("_processed.rds", "", basename(files))
 
 # ============================
-# 3. LOAD EXPRESSION MATRIX
+# 3. LOAD DEG CORE (FROM STEP 3)
 # ============================
 
-load_expr <- function() {
+eds_core <- read.csv(file.path(RESULTS_DIR, "DEG/EDS_core_genes.csv"))[,1]
+pots_core <- read.csv(file.path(RESULTS_DIR, "DEG/POTS_core_genes.csv"))[,1]
+shared_core <- read.csv(file.path(RESULTS_DIR, "DEG/shared_core_genes.csv"))[,1]
 
-  files <- list.files("data/processed", full.names = TRUE)
+all_core <- unique(c(eds_core, pots_core, shared_core))
 
-  expr_list <- list()
+# ============================
+# 4. FILTER EXPRESSION (IMPORTANT)
+# ============================
 
-  for (f in files) {
+filter_to_core <- function(expr, genes) {
 
-    if (grepl("_processed.rds", f)) {
+  common <- intersect(rownames(expr), genes)
 
-      data <- readRDS(f)
-      expr_list[[f]] <- data$expression
-    }
+  expr[common, , drop = FALSE]
+
+}
+
+# ============================
+# 5. WGCNA PER DATASET
+# ============================
+
+run_wgcna <- function(expr, name) {
+
+  datExpr <- t(expr)
+
+  # QC samples
+  gsg <- goodSamplesGenes(datExpr, verbose = 3)
+  datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes]
+
+  # soft threshold
+  powers <- c(1:10, seq(12, 30, 2))
+
+  sft <- pickSoftThreshold(datExpr,
+                           powerVector = powers,
+                           verbose = 5)
+
+  softPower <- ifelse(is.na(sft$powerEstimate), 6, sft$powerEstimate)
+
+  # adjacency
+  adj <- adjacency(datExpr, power = softPower)
+
+  TOM <- TOMsimilarity(adj)
+  dissTOM <- 1 - TOM
+
+  geneTree <- hclust(as.dist(dissTOM), method = "average")
+
+  dynamicMods <- cutreeDynamic(
+    dendro = geneTree,
+    distM = dissTOM,
+    deepSplit = 3,
+    pamRespectsDendro = FALSE,
+    minClusterSize = 30
+  )
+
+  colors <- labels2colors(dynamicMods)
+
+  MEs <- moduleEigengenes(datExpr, colors)$eigengenes
+
+  list(
+    colors = colors,
+    MEs = MEs,
+    TOM = TOM,
+    genes = colnames(datExpr),
+    name = name
+  )
+
+}
+
+# ============================
+# 6. RUN PER DATASET
+# ============================
+
+wgcna_results <- list()
+
+for (name in names(datasets)) {
+
+  cat("WGCNA:", name, "\n")
+
+  expr <- datasets[[name]]$expression
+
+  expr <- filter_to_core(expr, all_core)
+
+  if (nrow(expr) < 50) next
+
+  res <- run_wgcna(expr, name)
+
+  wgcna_results[[name]] <- res
+
+}
+
+# ============================
+# 7. CONSENSUS MODULE ANALYSIS
+# ============================
+
+module_overlap <- function(res_list) {
+
+  all_modules <- lapply(res_list, function(x) x$colors)
+
+  gene_sets <- lapply(res_list, function(x) x$genes)
+
+  common_genes <- Reduce(intersect, gene_sets)
+
+  consensus <- data.frame(gene = common_genes)
+
+  for (i in seq_along(res_list)) {
+
+    res <- res_list[[i]]
+
+    idx <- match(common_genes, res$genes)
+
+    consensus[[names(res_list)[i]]] <- res$colors[idx]
+
   }
 
-  common_genes <- Reduce(intersect, lapply(expr_list, rownames))
-  expr_list <- lapply(expr_list, function(x) x[common_genes, ])
+  consensus
 
-  merged <- do.call(cbind, expr_list)
-
-  return(merged)
 }
 
-expr <- load_expr()
-
-# keep only biologically relevant genes
-expr <- expr[intersect(rownames(expr), all_genes), ]
+consensus_modules <- module_overlap(wgcna_results)
 
 # ============================
-# 4. VARIANCE FILTERING (IMPORTANT UPGRADE)
+# 8. HUB GENE DETECTION (STRICT VERSION)
 # ============================
 
-gene_var <- apply(expr, 1, var)
+detect_hubs <- function(expr, MEs, genes) {
 
-top_genes <- names(sort(gene_var, decreasing = TRUE))[1:min(5000, length(gene_var))]
+  datExpr <- t(expr)
 
-expr <- expr[top_genes, ]
+  kME <- cor(datExpr, MEs, use = "p")
 
-# ============================
-# 5. TRANSPOSE FOR WGCNA
-# ============================
+  hub_scores <- apply(kME, 2, function(x) abs(x))
 
-datExpr <- t(expr)
+  hubs <- apply(hub_scores, 2, function(x) {
 
-# ============================
-# 6. SAMPLE QC
-# ============================
+    names(sort(x, decreasing = TRUE))[1:20]
 
-gsg <- goodSamplesGenes(datExpr, verbose = 3)
+  })
 
-if (!gsg$allOK) {
-  datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes]
+  hubs
+
+}
+
+hub_results <- list()
+
+for (name in names(datasets)) {
+
+  expr <- datasets[[name]]$expression
+
+  expr <- filter_to_core(expr, all_core)
+
+  if (nrow(expr) < 50) next
+
+  hub_results[[name]] <- detect_hubs(
+    expr,
+    wgcna_results[[name]]$MEs,
+    rownames(expr)
+  )
+
 }
 
 # ============================
-# 7. SAMPLE CLUSTERING (OUTLIER DETECTION)
+# 9. MODULE–DEG INTEGRATION
 # ============================
 
-sampleTree <- hclust(dist(datExpr), method = "average")
+module_deg_overlap <- data.frame()
 
-# optional: visualize later
-saveRDS(sampleTree, file = file.path(WGCNA_DIR, "sample_tree.rds"))
+for (name in names(wgcna_results)) {
 
-# ============================
-# 8. SOFT THRESHOLD SELECTION (IMPROVED)
-# ============================
+  colors <- wgcna_results[[name]]$colors
+  genes <- wgcna_results[[name]]$genes
 
-powers <- c(seq(1, 10, 1), seq(12, 30, 2))
+  eds_hits <- intersect(eds_core, genes)
+  pots_hits <- intersect(pots_core, genes)
 
-sft <- pickSoftThreshold(datExpr,
-                         powerVector = powers,
-                         verbose = 5)
+  module_deg_overlap <- rbind(module_deg_overlap,
+                              data.frame(
+                                dataset = name,
+                                eds_overlap = length(eds_hits),
+                                pots_overlap = length(pots_hits)
+                              ))
 
-softPower <- ifelse(is.na(sft$powerEstimate), 6, sft$powerEstimate)
-
-message(paste("Selected soft power:", softPower))
-
-# ============================
-# 9. ADJACENCY + TOM
-# ============================
-
-adjacency_matrix <- adjacency(datExpr, power = softPower)
-
-TOM <- TOMsimilarity(adjacency_matrix)
-
-dissTOM <- 1 - TOM
-
-geneTree <- hclust(as.dist(dissTOM), method = "average")
+}
 
 # ============================
-# 10. DYNAMIC MODULE DETECTION
+# 10. EXPORT NETWORK
 # ============================
 
-dynamicMods <- cutreeDynamic(
-  dendro = geneTree,
-  distM = dissTOM,
-  deepSplit = 3,
-  pamRespectsDendro = FALSE,
-  minClusterSize = 30
-)
+for (name in names(wgcna_results)) {
 
-moduleColors <- labels2colors(dynamicMods)
+  res <- wgcna_results[[name]]
 
-# ============================
-# 11. MODULE MERGING (IMPORTANT UPGRADE)
-# ============================
+  net <- data.frame(
+    gene = res$genes,
+    module = res$colors
+  )
 
-MEs <- moduleEigengenes(datExpr, colors = moduleColors)$eigengenes
+  write.csv(net,
+            file.path(NET_DIR, paste0(name, "_modules.csv")),
+            row.names = FALSE)
 
-MEDiss <- 1 - cor(MEs)
-
-METree <- hclust(as.dist(MEDiss), method = "average")
-
-merge <- mergeCloseModules(datExpr,
-                           moduleColors,
-                           cutHeight = 0.25,
-                           verbose = 3)
-
-moduleColors <- merge$colors
-MEs <- merge$newMEs
+}
 
 # ============================
-# 12. TRAIT DESIGN (EDS vs POTS)
+# 11. SAVE CONSENSUS
 # ============================
 
-nSamples <- nrow(datExpr)
-
-traitData <- data.frame(
-
-  EDS  = rep(c(1, 0), length.out = nSamples),
-  POTS = rep(c(0, 1), length.out = nSamples)
-
-)
-
-rownames(traitData) <- rownames(datExpr)
-
-# ============================
-# 13. MODULE–TRAIT CORRELATION
-# ============================
-
-moduleTraitCor <- cor(MEs, traitData, use = "p")
-
-moduleTraitP <- corPvalueStudent(moduleTraitCor, nSamples)
-
-write.csv(moduleTraitCor,
-          file = file.path(WGCNA_DIR, "module_trait_correlation.csv"))
-
-write.csv(moduleTraitP,
-          file = file.path(WGCNA_DIR, "module_trait_pvalues.csv"))
-
-# ============================
-# 14. HUB GENE DETECTION (UPGRADED)
-# ============================
-
-kME <- signedKME(datExpr, MEs)
-
-hub_scores <- apply(kME, 2, function(x) sort(x, decreasing = TRUE))
-
-top_hubs <- lapply(hub_scores, function(x) names(x)[1:15])
-
-write.csv(as.data.frame(top_hubs),
-          file = file.path(WGCNA_DIR, "hub_genes.csv"))
-
-# ============================
-# 15. MODULE MEMBERSHIP EXPORT (Cytoscape-ready)
-# ============================
-
-module_assignment <- data.frame(
-  gene = colnames(datExpr),
-  module = moduleColors
-)
-
-write.csv(module_assignment,
-          file = file.path(WGCNA_DIR, "module_assignment.csv"),
+write.csv(consensus_modules,
+          file.path(NET_DIR, "consensus_modules.csv"),
           row.names = FALSE)
 
-# ============================
-# 16. NETWORK EXPORT (FOR VISUALIZATION)
-# ============================
+write.csv(module_deg_overlap,
+          file.path(NET_DIR, "module_deg_overlap.csv"),
+          row.names = FALSE)
 
-# export TOM subset (top connections only)
-TOM_export <- TOM
-
-saveRDS(TOM_export,
-        file = file.path(WGCNA_DIR, "TOM_network.rds"))
-
-# ============================
-# 17. BIOLOGICAL CORE GENES
-# ============================
-
-shared_core <- intersect(eds_sig, pots_sig)
-
-write.csv(data.frame(shared_core),
-          file = file.path(WGCNA_DIR, "shared_core_genes.csv"))
-
-# ============================
-# 18. FINAL SUMMARY
-# ============================
-
-summary <- data.frame(
-  modules = length(unique(moduleColors)),
-  genes_used = ncol(datExpr),
-  samples = nrow(datExpr)
-)
-
-write.csv(summary,
-          file = file.path(WGCNA_DIR, "network_summary.csv"))
-
-message("Advanced network analysis completed")
+message("04_network_analysis completed")
